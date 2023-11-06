@@ -1,0 +1,296 @@
+---
+title: "Occ_Model_Clean_20210525"
+author: "Michael Glaser"
+date: "5/25/2021"
+output: word_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# SETUP
+
+## WD & LIBRARY
+
+```{r setup, include=FALSE}
+
+getwd()
+
+setwd("D:/13_PUBL_OCCUPANCY/08_Submission2_AgrEcoEnv/Appendix_GIT")
+
+###### tables
+library(tidyverse)
+library(data.table)
+
+###### database
+library(odbc)
+
+###### spatial
+library(sp)
+library(raster)
+library(sf)
+
+###### graphics
+library(ggmcmc)
+library(ggforce)
+
+###### Bayes
+library(runjags)
+
+### date stamp object for versioning
+sydate<-gsub("-","",Sys.Date())
+
+```
+
+
+## Read Shapefiles
+
+```{r}
+
+### set project crs
+proj.crs<-CRS("+init=epsg:3035")
+
+### Get shp and cut out unnecessary spaces
+iso<-c("AUT", "DEU", "SVK", "CZE", "HUN", "HRV", "ITA", "LIE", "CHE", "SVN")
+StudyArea<-do.call("bind",lapply(iso,function(x) getData('GADM',country=x,level=1,path=getwd())))
+
+notinarea<-c("Sardegna","Sicily", "Abruzzo", "Marche","Umbria", "Toscana","Calabria","Basilicata","Molise","Lazio","Puglia","Apulia","Campania")
+StudyArea<-StudyArea[!StudyArea@data$NAME_1 %in% notinarea,]
+
+StudyArea<-spTransform(StudyArea, proj.crs)
+StudyArea.sf<-st_as_sf(StudyArea)
+## EUROPE as underlying layer
+iso2<-c("ESP", "PRT", "FRA","BEL","LUX","POL","NLD", "AUT","DEU","SVK","CZE","HUN","HRV","ITA","LIE","CHE", "SVN", "MNE", "SRB", "BLR", "BIH", "UKR", "DNK", "ROU", "MDA", "AND")
+Europe.shp<-do.call("bind",lapply(iso2,function(x) getData('GADM',country=x,level=0,path=getwd())))
+
+Europe.shp<-spTransform(Europe.shp, proj.crs)
+
+Europe.sf<-st_as_sf(Europe.shp)
+
+```
+
+
+# LOAD DATA
+
+```{r}
+
+load("awc_master_GIT.RData")
+
+load("StudyAreasf.RData")
+
+load("awcspatialsf.RData")
+
+```
+
+
+
+# FUNCTION Version 20220215
+
+
+```{r}
+
+specdata<-awc.master
+
+occ.model<-function(specdata, modtype,
+                    n.iter, n.chains, n.burnin, n.thin, n.adapt, save.pars, dic,
+                    plot, savepath, specname,
+                    savedata){
+
+###-###-###-###-###-###-###-### DATA DATA DATA ###-###-###-###-###-###-###-###
+###-###-###-###-###-###-###-### DATA DATA DATA ###-###-###-###-###-###-###-### 
+###-###-###-###-###-###-###-### DATA DATA DATA ###-###-###-###-###-###-###-### 
+    
+  sysdate<-gsub("-","",Sys.Date())
+  
+print ("###-### 1 Formatting data ###-###")
+
+  ### keep only relevant columns of specdata = awc.master
+
+  specdata<-specdata[c("WC_ID","site","visit","time","timerank","specnumber","logL",specname)]
+  
+  ### create vectors for data.list
+  nyear       <-length(unique(specdata$timerank))          ### number of years 
+  nsite       <-max(specdata$site)                         ### number of sites 
+  nvisit      <-max(specdata$visit)                        ### number of visits 
+  y           <-specdata[[specname]]                       ### detection status of visit
+  logL        <-specdata$logL                              ### logarithm of list length 
+  Site        <-specdata$site                              ### Site associated with visit
+  Year        <-specdata$timerank                          ### Year associated with visit
+ 
+  ### combine into list
+  data.list<-list("nyear"=nyear,"nsite"=nsite,
+                  "nvisit"=nvisit,
+                  "y"=y        ,"logL"=logL,
+                  "Site"=Site  ,"Year"=Year)
+  
+print ("###-### 1.2 Processing Inits ###-###")        
+
+init.list<-list("chain1"=list("b"=runif(nyear,-2,2)   , "u"=runif(nsite,-2,2)     , "a"=runif(nyear,-2,2)     , c=runif(1,-2,2) ),
+                   "chain2"=list( "b"=runif(nyear,-2,2)   , "u"=runif(nsite,-2,2)     , "a"=runif(nyear,-2,2)     , c=runif(1,-2,2) ) )
+
+###-###-###-###-###-###-###-### MODEL MODEL MODEL ###-###-###-###-###-###-###-### 
+###-###-###-###-###-###-###-### MODEL MODEL MODEL ###-###-###-###-###-###-###-### 
+###-###-###-###-###-###-###-### MODEL MODEL MODEL ###-###-###-###-###-###-###-### 
+
+print ("###-### 2 Running Model ###-###")
+
+  mod.start<-Sys.time()
+  
+  jagsres<-autorun.jags(model=paste0("MODELS/",modtype,".txt"), method="parallel",  max.time="96 hours",
+                    data=data.list, modules=c("glm","dic"), monitor=save.pars, inits=init.list,
+                    thin=n.thin, thin.sample=T, adapt=n.adapt,  startburnin=n.burnin, 
+                    n.chains=n.chains, startsample=n.iter)
+
+  mod.end<-Sys.time()
+  
+  runtime<-as.numeric(mod.end-mod.start,units="hours")
+
+###-###-###-###-###-###-###-### PLOTS PLOTS PLOTS ###-###-###-###-###-###-###-### 
+###-###-###-###-###-###-###-### PLOTS PLOTS PLOTS ###-###-###-###-###-###-###-###
+###-###-###-###-###-###-###-### PLOTS PLOTS PLOTS ###-###-###-###-###-###-###-###  
+
+  if (plot==T){
+print("###-### 3 Generating Plots ###-###")
+
+    pdf(paste0(savepath,gsub(" ","",specname),"_",modtype,"_","thin",n.thin,".pdf")) 
+
+print("###-### 3.1 Sampling Overview Map ###-###")
+    
+    specjoin<-data.frame(WC_ID=specdata$WC_ID, PA=factor(specdata[[specname]]))
+    colnames(specjoin)<-c("WC_ID","pres_abs")
+   
+    thisspec.sf<-left_join(awc.spatial.sf, specjoin, by=c("WC_ID"))
+    
+    occplot<-ggplot()+theme_classic()+
+      geom_sf(StudyArea.sf,mapping=aes(), col="black")+
+      geom_sf(thisspec.sf,mapping=aes(col=factor(pres_abs)), size=0.1)+
+      ggtitle(paste(specname))
+    
+    print(occplot)
+
+print("###-### 3.2 Sampling Over time ###-###")    
+    
+    rectbl<-as.data.frame.matrix(table(cbind(specdata["time"],specdata[specname])))
+    colnames(rectbl)<-c("abs","pres")
+    rectbl$time<-row.names(rectbl)
+    records<-sum(rectbl$pres)
+    
+    occtemp<-ggplot(rectbl)+theme_classic()+
+      geom_col(aes(x=factor(time),y=pres),fill="darkolivegreen")+
+      geom_text(aes(x=factor(time),y=pres+0.05,label=pres),vjust=-0.5)+
+      scale_x_discrete(expand=c(0,0))+
+      scale_y_continuous(expand=c(0,0),limits=c(0,1.1*max(rectbl$pres)))+                     
+      xlab("timestep")+
+      ylab("recorded presences per timestep")+
+      ggtitle(paste0("Recorded presences of ",specname,", n=",sum(rectbl$pres)))  
+    
+    print(occtemp)
+    
+    parlabeldf<-data.frame(Parameter= paste0("psi.fs[",1:11,"]"),
+                           Label=paste0(seq(1910,2010,10),"s"))
+    
+    ### here was the start/end incompatible problem (fixed with as.mcmc.rjags)
+
+    jagsres.ggs<-ggs(jagsres$mcmc,keep_original_order=T, family="psi.fs", par_labels=parlabeldf)
+    
+print("###-### 3.3 Traceplots ###-###")
+    
+    for (pages in c(1:6)){
+      
+      thispage<-ggplot(jagsres.ggs,aes(x = Iteration, y = value, color = factor(Chain)))+theme_classic()+
+        geom_line() +
+        scale_y_continuous(expand=c(0,0), limits=c(0,1))+
+        scale_x_continuous(expand=c(0,0))+
+        facet_wrap_paginate(~ Parameter, nrow=2, ncol=1, scales="fixed", page=pages) 
+      
+      print(thispage)
+      
+    }
+    
+print("###-### 3.4 Geweke Plot ###-###")
+    
+    print(ggs_geweke(jagsres.ggs)+ggtitle(paste("Geweke Plot for", specname)))
+    
+print("###-### 3.5 Autocorrelation Plot ###-###")    
+
+    print(ggs_autocorrelation(jagsres.ggs))
+    
+print("###-### 3.6 Occupancy Estimates ###-###")
+    
+    jagsres.ci<-ci(jagsres.ggs)
+    jagsres.ci$parnum<-as.numeric(as.character(gsub("s","",jagsres.ci$Parameter)))
+    
+    occ.lm<-lm(jagsres.ci$median~jagsres.ci$parnum)
+    res.norm<-shapiro.test(occ.lm$residuals)
+    occ.int<-occ.lm$coefficients[["(Intercept)"]]
+    occ.slo<-occ.lm$coefficients[["jagsres.ci$parnum"]]
+    
+    occ.res<-ggplot(jagsres.ci, aes(x=parnum, y=median,))+ theme_classic()+
+      geom_point(size=2.5, shape=15)+
+      geom_abline(slope=occ.slo, intercept=occ.int, col="red", linewidth=2)+
+      geom_line(linetype="dashed")+
+      geom_ribbon(aes(ymin=Low,ymax=High), color="grey20", alpha=0.1)+
+      geom_ribbon(aes(ymin=low,ymax=high), color="grey50", alpha=0.1)+
+      scale_y_continuous(limits=c(0,1), expand=c(0,0), breaks=seq(0,1,0.1))+
+      scale_x_continuous(limits=c(min(jagsres.ci$parnum),max(jagsres.ci$parnum)),expand=c(0,0.5),
+                         breaks=jagsres.ci$parnum, labels=jagsres.ci$Parameter)+
+      theme(axis.text.x = element_text(hjust=0.85))+
+      ggtitle(paste("Occupancy and CIs for",specname,"lm-trend=",round(occ.slo,3)))+
+      xlab("timestep")+
+      ylab("median occupancy")
+    
+    print(occ.res)
+
+    occ.trend<-list(occ.lm=occ.lm, res.norm=res.norm, occ.int=occ.int, occ.slo=occ.slo)
+    
+    dev.off()
+  }
+  
+print("###-### 4 Saving Data ###-###")
+  
+  ggs.diagn<-ggs_diagnostics(jagsres.ggs)
+  
+  returnlist<-list(specname=specname, records=records, modtype=modtype, jagsres=jagsres, jagsres.ggs=jagsres.ggs,
+                   diagn=ggs.diagn, occ.ci=jagsres.ci,
+                   occ.trend=occ.trend,
+                   runtime.hrs=round(runtime,2), rundate=sysdate
+  )  
+  
+  
+  if(savedata==T){ save(returnlist,file=paste0(savepath,"/",gsub(" ","",specname),"_",modtype,"_","thin",n.thin,".RData") )}
+  
+  return(returnlist)
+  
+}
+
+
+```
+
+# TEST RUN 
+
+Using **Stellaria media** as test species (just change by reassigning "specname").
+The warning after the run is irrelevant, as JAGS automatically starts the initial values with different random number generators if not supplied with different values.
+
+```{r}
+
+### general parameter settings
+n.iter    <- 5000
+n.chains  <- 2
+n.thin    <- 3
+n.adapt   <- 1500
+n.burnin  <- 1500
+plot      <- T
+savepath  <- paste0(getwd(),"/OUTPUT/")
+savedata  <- T
+save.pars <- c(paste0("psi.fs"))
+modtype   <- "randomwalk"  
+
+### now just change species name
+specname  <-"Stellaria media"
+test_Stel.med<-occ.model(awc.master, modtype,
+                     n.iter, n.chains, n.burnin, n.thin, n.adapt, save.pars, dic,
+                     plot, savepath, specname, savedata)
+
+```
+
+
+
